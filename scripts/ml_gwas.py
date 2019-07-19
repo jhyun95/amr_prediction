@@ -65,9 +65,9 @@ def train_ensemble(allele_table_path, amr_path, antibiotic, gene_path=None,
 
 
 class RSE:
-    ''' Generic Random Subspace Ensemble supporting most sklearn classifiers.
-        Has basic functions such as fitting, predicting, extracting coefficients,
-        tracking sampled features/samples, saving, and loading ''' 
+    ''' Generic Random Subspace Ensemble supporting most sklearn binary classifiers,
+        with an emphasis on feature selection. Has basic functions such as fitting, 
+        predicting, extracting coefficients, and tracking sampled features/samples. ''' 
 
     LOG_ITER = 50
 
@@ -117,7 +117,7 @@ class RSE:
 
     def fit(self, X, y):
         ''' 
-        Fits the models in the ensemble 
+        Fits the models in the ensemble.
 
         Parameters
         ----------
@@ -145,9 +145,6 @@ class RSE:
                 insample = np.random.choice(all_instances, instance_limit)
                 X_train = X[insample,:]
                 y_train = y[insample] 
-                #outsample = np.delete(all_instances, insample)
-                #X_test = X[outsample,:]
-                #y_test = X[outsample] 
 
             ''' Feature sampling: Subsampling w/o replacement, to simplify feature weight averaging '''
             if self.bootstrap_features < 1.0: # random subspace, sub-select features each time
@@ -164,6 +161,81 @@ class RSE:
             self.models[i] = clf
             self.selected_instances[:,i] = insample
             self.selected_features[infeatures,i] = 1
+
+    def predict(self, X):
+        ''' 
+        Predicts labels for instances in X, treating the ensemble as a voting classifier.
+        TODO: Enable user-defined weights on each model, such as based on individual performance.
+        TODO: Implement support for regressors
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Instances, n_features must be the same as that of instances used for training
+
+        Returns 
+        -------
+        y : array, shape = (n_samples)
+            Predicted labels
+        '''
+        n_instances = X.shape[0]
+        predictions = np.zeros((n_instances, len(self.models)))
+        for i,clf in enumerate(self.models):
+            if self.bootstrap_features < 1.0: # get features used in this model
+                infeatures = np.nonzero(self.selected_features[:,i])[0]
+                X_clf = X[:,infeatures]
+            else:
+                X_clf = X
+            predictions[:,i] = clf.predict(X_clf)
+
+        avg_predictions = predictions.mean(axis=1)
+        y = (avg_predictions > 0.5).astype(int)
+        return y
+        
+
+    def compute_performance(self, X, y, metric=sklearn.metrics.matthews_corrcoef):
+        ''' 
+        Computes the prediction performance of each model in the ensemble on 
+        samples both used and unused in training. 
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Training data, same as what was used for RSE.fit(X,y)
+        y : array-list, shape = (n_samples)
+            Target vector, same as what used for RSE.fit(X,y)
+        metric : function
+            Score function f(y, y_predicted), default computes the MCC
+
+        Returns 
+        -------
+        scores : array, shape = (n_models, 2)
+            List of scores for each model in the ensemble, 1st column contains scores
+            on training set, second column contains scores on out-of-bag samples
+        '''
+        n_instances, n_features = X.shape
+        scores = np.zeros((len(self.models), 2))
+        for i,clf in enumerate(self.models):
+            ''' Identify which instances were not used for training '''
+            insample = self.selected_instances[:,i]
+            outsample = np.delete(np.arange(n_instances), insample)
+            X_train = X[insample,:]
+            y_train = y[insample]
+            X_test = X[outsample,:]
+            y_test = y[outsample]
+            if self.bootstrap_features < 1.0: # get features used in this model
+                infeatures = np.nonzero(self.selected_features[:,i])[0]
+                X_train = X_train[:,infeatures]
+                X_test = X_test[:,infeatures]
+
+            ''' Compute score on training vs out-of-bag samples '''
+            y_hat_train = clf.predict(X_train)
+            y_hat_test = clf.predict(X_test)
+            score_train = metric(y_train, y_hat_train)
+            score_test = metric(y_test, y_hat_test)
+            scores[i,:] = (score_train, score_test)
+
+        return scores
 
 
     def get_coefficient_matrix(self, feature_names=None, reduced=True, order=0):
