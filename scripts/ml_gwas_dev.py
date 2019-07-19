@@ -8,7 +8,7 @@ Created on Wed Jan 02 10:05:12 2019
 
 import os
 import numpy as np
-import scipy.stats
+import scipy.stats, scipy.sparse
 import pandas as pd
 import sklearn.metrics, sklearn.svm, sklearn.base, sklearn.ensemble
 import joblib
@@ -126,8 +126,6 @@ class RSE:
             Training data
         y : array-list, shape = (n_samples)
             Target vector
-        cores : int 
-            If cores > 1, trains models in parallel on this many cores (default 1)
         '''
         num_models = len(self.models)
         n_instances, n_features = X.shape
@@ -135,7 +133,15 @@ class RSE:
         feature_limit = int(float(n_features) * self.bootstrap_features)
         self.selected_instances =  np.zeros((instance_limit, num_models), dtype='int32') # integer
         self.selected_features = np.zeros((n_features, num_models), dtype='int8') # binary
+
+        ''' Sparsify if non-zero elements < 50% '''
+        Xs = X
+        if not scipy.sparse.issparse(Xs):
+            sparsity = float(np.count_nonzero(X)) / (n_instances * n_features)
+            if sparsity < 0.5:
+                Xs = scipy.sparse.csr_matrix(Xs)
         
+        ''' Train models sequentially '''
         for i in range(num_models):
             model_name = 'Model_' + str(i)
             if (i+1) % self.LOG_ITER == 0:
@@ -146,7 +152,7 @@ class RSE:
             while np.sum(y_train) == 0 or np.sum(y_train) == len(y_train): # shuffle until both label types in group
                 all_instances = np.arange(n_instances)
                 insample = np.random.choice(all_instances, instance_limit)
-                X_train = X[insample,:]
+                X_train = Xs[insample,:]
                 y_train = y[insample] 
 
             ''' Feature sampling: Subsampling w/o replacement, to simplify feature weight averaging '''
@@ -165,8 +171,19 @@ class RSE:
             self.selected_features[infeatures,i] = 1
 
 
-    def fit_parallel(self, X, y, cores):
-        ''' Parallel training of ensemble using joblib '''
+    def fit_parallel(self, X, y, cores=1):
+        ''' 
+        Fits the models in the ensemble, training models in parallel with joblib
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Training data
+        y : array-list, shape = (n_samples)
+            Target vector
+        cores : int 
+            If cores > 1, trains models in parallel on this many cores (default 1)
+        '''
         num_models = len(self.models)
         n_instances, n_features = X.shape
         instance_limit = int(float(n_instances) * self.bootstrap_instances)
@@ -174,6 +191,13 @@ class RSE:
         self.selected_instances =  np.zeros((instance_limit, num_models), dtype='int32') # integer
         self.selected_features = np.zeros((n_features, num_models), dtype='int8') # binary
 
+        ''' Sparsify if non-zero elements < 50% '''
+        Xs = X
+        if not scipy.sparse.issparse(Xs):
+            sparsity = float(np.count_nonzero(X)) / (n_instances * n_features)
+            if sparsity < 0.5:
+                Xs = scipy.sparse.csr_matrix(Xs)
+            
         ''' Do instance and feature sampling upfront, before parallelizing '''
         print('Sampling instances and features...')
         for i in range(num_models):
@@ -192,12 +216,12 @@ class RSE:
 
         print('Training models...')
         def training_data_generator():
-            ''' Generator for training sets '''
+            ''' Generator for training sets using earlier sampling '''
             for i in range(num_models):
                 insample = self.selected_instances[:,i]
                 infeatures = np.nonzero(self.selected_features[:,i])[0] 
                 clf = sklearn.base.clone(self.base_model)
-                yield clf, X[insample,:][:,infeatures], y[insample]
+                yield clf, Xs[insample,:][:,infeatures], y[insample]
         
         def fit_model(training_entry):
             ''' Function for parallel model training  '''
@@ -206,7 +230,7 @@ class RSE:
             return clf
 
         ''' Parallelized training with joblib '''
-        os.system('taskset -p 0xff %d' % os.getpid()) # some packages alter cpu affinity(?), reset here
+        # os.system('taskset -p 0xff %d' % os.getpid()) # some packages alter cpu affinity(?), reset here
         self.models = joblib.Parallel(n_jobs=cores, verbose=2)(
             joblib.delayed(fit_model)(entry) for entry in training_data_generator())
         # TODO: Not actually getting any speed-up, needs more work here
